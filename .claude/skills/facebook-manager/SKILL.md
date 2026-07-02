@@ -10,4 +10,5 @@ description: This system automates Facebook Page management for accounts that ha
 
 ## Scripts
 All the scripts are in `./scripts/`:
-- 
+- `get-token.js` - Get list of page and access-token of each page
+- `schedule-post.js` - Schedule time to create content
