@@ -17,7 +17,7 @@ const envSchema = z.object({
 const env = envSchema.parse(process.env);
 
 const spreadsheetId = env.SHEET_URL.match(
-  /\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/
+  /\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/,
 )?.[1];
 
 if (!spreadsheetId) {
@@ -33,7 +33,7 @@ const sheetMetaSchema = z.object({
         sheetId: z.number().optional(),
         index: z.number().optional(),
       }),
-    })
+    }),
   ),
 });
 
@@ -103,7 +103,7 @@ async function getSheetNames() {
 
 async function getSheetData(sheetName) {
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(
-    sheetName
+    sheetName,
   )}`;
 
   const response = await axios.get(url, {
@@ -135,13 +135,27 @@ async function getSheetData(sheetName) {
 async function main() {
   const sheetNames = await getSheetNames();
   const data = await getSheetData(sheetNames[0]);
-    data.forEach(item => {
-        if (item.mainImageLink)  downloadDriveImage(item.mainImageLink)
-        if (item.secondaryImageLink) downloadDriveImage(item.secondaryImageLink)
+
+  await Promise.all(
+    data.map(async (item) => {
+      if (item.mainImageLink) {
+        item.mainImagePath = await downloadDriveImage(item.mainImageLink);
+      }
+
+      if (item.secondaryImageLink) {
+        item.secondaryImagePath = await downloadDriveImage(item.secondaryImageLink);
+      }
+
+      if (item.zaloOaImageLink) {
+        item.zaloOaImagePath = await downloadDriveImage(item.zaloOaImageLink);
+      }
     })
+  );
+
+  console.log(data);
 }
 
-main().catch((err) => {
+ main().catch((err) => {
   if (err instanceof z.ZodError) {
     console.error("Validation error:");
     console.error(err.errors);
