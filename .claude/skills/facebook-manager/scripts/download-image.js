@@ -1,47 +1,46 @@
 const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
+const { getAccessToken } = require("./google-oauth");
 
-const extractDriveFileId = (driveUrl) => {
-  const match = driveUrl.match(/\/file\/d\/([a-zA-Z0-9-_]+)/);
-  return match?.[1] || null;
-};
+// Downloads a Drive file's binary content straight to disk via the Drive
+// API — content never passes through the caller's context, unlike the
+// Drive MCP tool's base64 responses (impractical for multi-MB images).
+async function downloadDriveFile(fileId, destPath) {
+  const accessToken = await getAccessToken();
 
-const downloadDriveImage = async (driveUrl, outputDir = path.join(__dirname, "images")) => {
-  const fileId = extractDriveFileId(driveUrl);
+  const response = await axios.get(
+    `https://www.googleapis.com/drive/v3/files/${fileId}`,
+    {
+      params: { alt: "media" },
+      headers: { Authorization: `Bearer ${accessToken}` },
+      responseType: "arraybuffer",
+    },
+  );
 
-  if (!fileId) {
-    throw new Error("Invalid Google Drive URL");
+  fs.mkdirSync(path.dirname(destPath), { recursive: true });
+  fs.writeFileSync(destPath, response.data);
+
+  return destPath;
+}
+
+async function main() {
+  const [fileId, destPath] = process.argv.slice(2);
+
+  if (!fileId || !destPath) {
+    console.error("Usage: node download-image.js <driveFileId> <destPath>");
+    process.exit(1);
   }
 
-  const directUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+  const savedPath = await downloadDriveFile(fileId, destPath);
+  console.log(`✅ Saved: ${savedPath}`);
+}
 
-  const response = await axios.get(directUrl, {
-    responseType: "arraybuffer",
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("❌", err.response?.data || err.message);
+    process.exit(1);
   });
+}
 
-  if (!fs.existsSync(outputDir)) {
-    fs.mkdirSync(outputDir, { recursive: true });
-  }
-
-  const contentType = response.headers["content-type"];
-  let ext = ".jpg";
-
-  if (contentType.includes("png")) ext = ".png";
-  else if (contentType.includes("jpeg")) ext = ".jpg";
-  else if (contentType.includes("gif")) ext = ".gif";
-  else if (contentType.includes("webp")) ext = ".webp";
-
-  const filePath = path.join(outputDir, `${fileId}${ext}`);
-
-  fs.writeFileSync(filePath, response.data);
-
-  console.log(`Saved: ${filePath}`);
-
-  return filePath;
-};
-
-module.exports = {
-  downloadDriveImage,
-  extractDriveFileId,
-};
+module.exports = { downloadDriveFile };

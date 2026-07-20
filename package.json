@@ -2,8 +2,9 @@
   "name": "claude-project",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "src/server.js",
   "scripts": {
+    "start": "node src/server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -11,9 +12,16 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "axios": "^1.18.0",
+    "axios": "^1.18.1",
+    "bullmq": "^5.79.3",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "form-data": "^4.0.6",
+    "ioredis": "^5.11.1",
+    "multer": "^2.2.0",
+    "pg": "^8.22.0",
+    "winston": "^3.19.0",
+    "xlsx": "^0.18.5",
     "zod": "^4.4.3"
   }
 }

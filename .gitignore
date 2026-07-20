@@ -1,2 +1,6 @@
 .env
 node_modules
+settings.json
+images/
+post-log-*.json
+.DS_Store

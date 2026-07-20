@@ -4,10 +4,17 @@ const { z } = require("zod");
 
 dotenv.config();
 
-const accessToken = process.env.MAIN_PAGE_ACCESS_TOKEN;
+// Two separate Facebook accounts each manage their own portfolio of Pages;
+// the full managed-Pages list is the union of both, deduped by Page id.
+const TOKEN_SOURCES = [
+  { envVar: "MAIN_PAGE_ACCESS_TOKEN", token: process.env.MAIN_PAGE_ACCESS_TOKEN },
+  { envVar: "SECOND_PAGE_ACCESS_TOKEN", token: process.env.SECOND_PAGE_ACCESS_TOKEN },
+].filter((source) => source.token);
 
-if (!accessToken) {
-  console.error("Error: MAIN_PAGE_ACCESS_TOKEN not found in .env file");
+if (TOKEN_SOURCES.length === 0) {
+  console.error(
+    "Error: neither MAIN_PAGE_ACCESS_TOKEN nor SECOND_PAGE_ACCESS_TOKEN found in .env file",
+  );
   process.exit(1);
 }
 
@@ -26,30 +33,52 @@ const PagesResponseSchema = z.object({
   data: z.array(PageSchema),
 });
 
+const getPagesForToken = async (accessToken) => {
+  const response = await axios.get(
+    "https://graph.facebook.com/v25.0/me/accounts?limit=200",
+    {
+      params: {
+        access_token: accessToken,
+        fields: "id,name,access_token",
+      },
+    },
+  );
+
+  return PagesResponseSchema.parse(response.data).data;
+};
+
 const getPages = async () => {
   try {
-    const response = await axios.get(
-      "https://graph.facebook.com/v25.0/me/accounts",
-      {
-        params: {
-          access_token: accessToken,
-          fields: "id,name,access_token",
-        },
-      },
-    );
+    const byId = new Map();
+    let successCount = 0;
 
-    const validatedData = PagesResponseSchema.parse(response.data);
-
-    console.log(
-      `✅ Successfully fetched ${validatedData.data.length} page(s)\n`,
-    );
-
-    if (validatedData.data.length === 0) {
-      console.log("NO DATA");
-      return [];
+    for (const { envVar, token } of TOKEN_SOURCES) {
+      try {
+        const pages = await getPagesForToken(token);
+        successCount++;
+        for (const page of pages) {
+          if (!byId.has(page.id)) byId.set(page.id, page);
+        }
+      } catch (error) {
+        const message = error.response?.data?.error?.message || error.message;
+        console.error(`❌ ${envVar}: ${message}`);
+      }
     }
 
-    return validatedData.data;
+    if (successCount === 0) {
+      // every configured token failed outright — this is a hard failure, not "no pages"
+      return null;
+    }
+
+    const pages = [...byId.values()];
+
+    console.log(`✅ Successfully fetched ${pages.length} page(s)\n`);
+
+    if (pages.length === 0) {
+      console.log("NO DATA");
+    }
+
+    return pages;
   } catch (error) {
     if (error instanceof z.ZodError) {
       console.error("❌ Validation Error:");
@@ -59,14 +88,7 @@ const getPages = async () => {
       return null;
     }
 
-    if (error.response) {
-      console.error(`❌ Facebook API Error (${error.response.status}):`);
-      console.error(error.response.data.error?.message || error.response.data);
-    } else if (error.request) {
-      console.error("❌ No response received from Facebook API");
-    } else {
-      console.error("❌ Error:", error.message);
-    }
+    console.error("❌ Error:", error.message);
     return null;
   }
 };
@@ -76,4 +98,8 @@ async function main() {
   console.log(data);
 }
 
-main()
+if (require.main === module) {
+  main();
+}
+
+module.exports = { getPages };
