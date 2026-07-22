@@ -7,13 +7,13 @@ dotenv.config();
 // Two separate Facebook accounts each manage their own portfolio of Pages;
 // the full managed-Pages list is the union of both, deduped by Page id.
 const TOKEN_SOURCES = [
-  { envVar: "MAIN_PAGE_ACCESS_TOKEN", token: process.env.MAIN_PAGE_ACCESS_TOKEN },
-  { envVar: "SECOND_PAGE_ACCESS_TOKEN", token: process.env.SECOND_PAGE_ACCESS_TOKEN },
+  { envVar: "FB_ACCOUNT_1_ACCESS_TOKEN", token: process.env.FB_ACCOUNT_1_ACCESS_TOKEN },
+  { envVar: "FB_ACCOUNT_2_ACCESS_TOKEN", token: process.env.FB_ACCOUNT_2_ACCESS_TOKEN },
 ].filter((source) => source.token);
 
 if (TOKEN_SOURCES.length === 0) {
   console.error(
-    "Error: neither MAIN_PAGE_ACCESS_TOKEN nor SECOND_PAGE_ACCESS_TOKEN found in .env file",
+    "Error: neither FB_ACCOUNT_1_ACCESS_TOKEN nor FB_ACCOUNT_2_ACCESS_TOKEN found in .env file",
   );
   process.exit(1);
 }

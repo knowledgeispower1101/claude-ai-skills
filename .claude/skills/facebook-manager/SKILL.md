@@ -38,25 +38,32 @@ Record that same nested path in `imagePaths`/`videoPaths` so it round-trips corr
 
 ## Access tokens (.env)
 
-`scripts/.env` holds two separate Facebook access tokens — `MAIN_PAGE_ACCESS_TOKEN` and `SECOND_PAGE_ACCESS_TOKEN` — each from a different Facebook account, each managing its own portfolio of Pages (the portfolios overlap partially but aren't identical: some Pages are only reachable via one token). `get-token.js` calls `/me/accounts` with both tokens and merges the results, deduped by Page id, so the full managed-Pages list Claude works from is always the union of both. If one token is invalid/blocked, `get-token.js` logs which one failed and still returns the Pages from the other rather than failing outright — only fails hard (returns `null`) if *both* tokens fail. Always use `get-token.js`'s merged output as the Page list; don't read either `.env` token directly in a workflow.
+`scripts/.env` holds two separate Facebook access tokens — `FB_ACCOUNT_1_ACCESS_TOKEN` and `FB_ACCOUNT_2_ACCESS_TOKEN` — each from a different Facebook account, each managing its own portfolio of Pages (the portfolios overlap partially but aren't identical: some Pages are only reachable via one token). The `1`/`2` numbering is arbitrary — neither account is "primary"; they're just two logins whose managed-Pages lists get unioned. `get-token.js` calls `/me/accounts` with both tokens and merges the results, deduped by Page id, so the full managed-Pages list Claude works from is always the union of both. If one token is invalid/blocked, `get-token.js` logs which one failed and still returns the Pages from the other rather than failing outright — only fails hard (returns `null`) if *both* tokens fail. Always use `get-token.js`'s merged output as the Page list; don't read either `.env` token directly in a workflow. Because a source Page for `share-post.js` can come from either token's portfolio (only the *target* Page's `access_token` is used to actually post the share, see `share-post.js` below), sharing works in both directions between the two accounts' Pages.
 
 ## Scripts
 All the scripts are in `./scripts/`:
 - `get-token.js` - fetches `id`, `name`, and `access_token` for every Page reachable from either of the two tokens in `.env` (see "Access tokens" above), merged and deduped by Page id
 - `post-content.js` - posts (or schedules) a message + images/video to one or more Pages via the Facebook Graph API
-  - exports `postContent({ message, imagePaths, videoPaths, pages, published, scheduledTime, sourceFolder })`
+  - exports `postContent({ message, imagePaths, videoPaths, pages, published, scheduledTime, sourceFolder, delayRange })`
   - `pages` is an array of `{ id, name, access_token }` (use the output of `get-token.js`)
   - `imagePaths`/`videoPaths` default to `[]`. Behavior: both empty → text-only post; exactly one image and no video → single photo post; exactly one video and no image → single video post (posted to `/videos` so it gets native video playback); anything else (multiple items, or images+video mixed) → each item uploaded unpublished first, then attached together to one feed post via `attached_media`
   - `published: false` requires `scheduledTime` (unix seconds)
   - `sourceFolder` is optional (e.g. the Drive day-folder path) and is only used for the log entry below
+  - Pages are posted to **sequentially**, with a random pause between them drawn from `delayRange` (`{min, max}` in seconds, default `{min: 120, max: 300}`) — see "Never publish to many Pages at once" below. Pass `{min: 0, max: 0}` only for a single-Page post. Budget the wall-clock time before starting: 34 Pages at the default is roughly 1.5–2 hours, so run it in the background and report progress.
   - every successful post is appended to that month's log file (see "Post log" below) — no separate step needed
   - CLI usage: `node post-content.js '<json-request>'`
+- `fetch-source-post.js` - pulls an existing published post's caption and media so it can be re-posted natively to other Pages (the safe replacement for link-sharing)
+  - exports `fetchSourcePost(postId, sourcePage)`, `downloadMedia(postId, media)`, and `fetchAndDownload(postId, sourcePage)`
+  - `fetchAndDownload` returns `{ id, message, permalinkUrl, createdTime, imagePaths, videoPaths }` — the paths are relative to `./scripts/` and drop straight into `postContent`
+  - media lands in `./scripts/images/<sourcePostId>/`, numbered in the post's own order
+  - do not request the `status_type` field from the Graph API — it is rejected from v3.3 up and fails the whole call
+  - CLI usage: `node fetch-source-post.js <postId> '<source-page-json>'`
 - `delete-post.js` - deletes a previously published/scheduled post using the log
   - looks up the post's `pageId` across the monthly log files, re-fetches a fresh access token for that Page via `get-token.js`, calls the Graph API delete, then removes the entry from whichever monthly file has it
   - also deletes that entry's local downloaded images/video under `./scripts/images/` — but only if no other remaining log entry (in any month) still references them (the same media is often shared across multiple Pages/posts)
   - CLI usage: `node delete-post.js <postId>`
   - exports `deleteLoggedPost(postId)`
-- `share-post.js` - shares one Page's existing post to one or more other Pages, via a "shared link" post (the target Page posts a link to the original, which Facebook renders as a share preview card)
+- `share-post.js` - **deprecated for multi-Page use, see "Never publish to many Pages at once" below** — shares one Page's existing post to one or more other Pages, via a "shared link" post (the target Page posts a link to the original, which Facebook renders as a share preview card)
   - `node share-post.js list '{"id":"...","name":"...","access_token":"..."}'` → recent posts of that Page (`id`, `message`, `created_time`, `permalink_url`, `full_picture`), for the user to pick which one to share
   - exports `listRecentPosts(page, limit)` and `shareContent({ sourcePostId, sourcePermalinkUrl, message, targetPages, published, scheduledTime })`
   - `targetPages` is an array of `{ id, name, access_token }`; `message` is an optional extra caption on top of the shared link
@@ -126,15 +133,44 @@ Every piece of content that gets created or scheduled for posting must also show
 8. **Publish**: call `post-content.js` (via `postContent(...)`) once per post, with that post's message, `imagePaths`/`videoPaths`, resolved `published`/`scheduledTime`, confirmed list of `pages`, and `sourceFolder` set to the Drive day-folder path. Report per-post, per-Page success/failure back to the user. Each successful Page post is automatically recorded in that month's log file (see "Post log" below) — no manual bookkeeping needed.
 9. **Sync to Google Calendar**: for each successful Page post from step 8, create a calendar event and link it back to the log entry — see "Google Calendar sync" below. Do this for every publish, whether it went out now or is scheduled for the future.
 
-## Workflow: sharing a Page's post to other Pages
+## Never publish to many Pages at once
+
+Two things get a batch hidden by Facebook's integrity systems. Both were confirmed on 2026-07-22, when 34 link-shares and 18 native posts of the *same* content went out minutes apart:
+
+- **Link-sharing the same post to many Pages.** All 34 link-shares were hidden behind "Bạn hiện không xem được nội dung này" for non-admins, and two were later deleted by Facebook outright. The Graph API still reported them as `is_published: true`, `is_hidden: false`, privacy `EVERYONE`, with intact attachments — the data looks perfect, so **never conclude from the API that a share is fine**. Meanwhile all 18 native photo posts, published concurrently from the same tooling, were untouched. The format is the trigger, not the volume.
+- **Bursting.** `Promise.all` across N Pages puts N identical posts on Facebook in the same second. `postContent` now staggers Pages sequentially instead (see `delayRange`).
+
+So, for anything past a couple of Pages:
+
+1. **Re-post natively instead of link-sharing.** Use `fetch-source-post.js` to pull the original's caption and media, then `postContent` those to each target Page. Reach for `share-post.js` only when the user explicitly wants a share-preview card and the target list is short.
+2. **Keep the stagger.** Leave `delayRange` at its default unless the user asks otherwise; never set it to zero for a multi-Page run to save time.
+3. **Warn the user before a large batch** how long it will take, and offer to split it across several runs or days.
+
+### Reporting progress on a staggered run
+
+`postContent` prints a timeline-style report after **every** Page — the format the user picked:
+
+```
+20:44  ✅  Biến Tần Bình Chánh
+── 16/34 trang · ✅15 ❌1 · còn ~50 phút ──
+⏳ Kế tiếp: Biến tần Nghệ An (sau 3p10s)
+```
+
+Run the batch under the **Monitor** tool, not `Bash(run_in_background)`. Monitor turns each stdout line into a chat notification, which is the only way the user gets a live update per Page; a backgrounded Bash command only notifies once, on exit. The three lines above are printed together so Monitor batches them into a single notification per Page. Set `timeout_ms` above the run's expected wall-clock time (34 Pages ≈ 2 hours) or the monitor is killed mid-run.
+
+Relay these lines to the user as-is — don't reformat them into a table or summarise them away.
+
+## Workflow: re-posting a Page's post to other Pages
 
 The team includes non-technical members, so this flow is pure multiple-choice — never ask them to paste a post ID, a URL, or any JSON. Everything Claude needs (Page IDs, tokens, post IDs, permalink URLs) is fetched internally and only human-readable labels are shown to the user.
 
-1. **Ask which Page to pull content from** (the "source" Page): run `get-token.js`, then present the Page names as a single-select list ("Bạn muốn lấy nội dung từ trang nào để chia sẻ?").
-2. **Show that Page's recent posts as a picker**: call `node share-post.js list '<page-json>'` for the chosen Page, then present each returned post as an option — label = first ~60 characters of `message` (or "[ảnh, không có chữ]" if empty), with the post's date as the description. Single-select ("Chia sẻ bài viết nào?"). Keep this to the most recent 5-8 posts so the list isn't overwhelming.
-3. **Ask which Page(s) receive the share**: present all *other* Pages (exclude the source Page) as a multi-select list ("Chia sẻ bài này sang (những) trang nào?").
-4. **Ask if they want to add a short caption** on top of the shared link, or share as-is (optional free-text vs. a "Không, chia sẻ nguyên bản" option) — keep this optional and skippable, don't make it a required step.
-5. **Resolve timing** the same way as posting (see steps 6 in the posting workflow above): future date → ask for a time and schedule; today/past or "now" → confirm explicitly before sharing.
-6. **Confirm before sharing**: show one plain-language summary — which post (short preview), from which Page, to which Page(s), and when — and get explicit confirmation.
-7. **Share**: call `share-post.js` (via `shareContent(...)`) once with the source post's `id`/`permalink_url` and the confirmed `targetPages`. Report per-Page success/failure in plain language (Page name, not raw IDs). Successful shares are automatically recorded in that month's log file with `sharedFrom` set, so they can be found and deleted later exactly like a normal post.
-8. **Sync to Google Calendar**: for each successful share from step 7, create a calendar event and link it back to the log entry — see "Google Calendar sync" below, same as the posting workflow.
+1. **Ask which Page to pull content from** (the "source" Page): run `get-token.js`, then present the Page names as a single-select list ("Bạn muốn lấy nội dung từ trang nào?").
+2. **Show that Page's recent posts as a picker**: call `node share-post.js list '<page-json>'` for the chosen Page, then present each returned post as an option — label = first ~60 characters of `message` (or "[ảnh, không có chữ]" if empty), with the post's date as the description. Single-select ("Lấy bài viết nào?"). Keep this to the most recent 5-8 posts so the list isn't overwhelming.
+3. **Ask which Page(s) receive it**: present all *other* Pages (exclude the source Page) as a multi-select list ("Đăng bài này lên (những) trang nào?").
+4. **Check the log for duplicates**: call `readAllLogs()` and look for today's entries on the chosen Pages carrying the same message. If any exist, show the user what is already published and confirm before continuing — the same batch has been published twice within an hour before.
+5. **Fetch the source content**: `fetchAndDownload(postId, sourcePage)` from `fetch-source-post.js` gives the caption plus local `imagePaths`/`videoPaths`.
+6. **Ask whether to edit the caption** or keep the original wording (optional free-text vs. a "Giữ nguyên nội dung gốc" option) — optional and skippable.
+7. **Resolve timing** the same way as posting (see step 6 in the posting workflow above): future date → ask for a time and schedule; today/past or "now" → confirm explicitly first.
+8. **Confirm before publishing**: show one plain-language summary — which post (short preview), from which Page, to which Page(s), when, and roughly how long the staggered run will take.
+9. **Publish**: call `postContent(...)` once with the fetched caption/media and the confirmed `targetPages`. It posts sequentially with a random pause between Pages, so run it in the background for anything over a handful of Pages and report progress as it goes. Report per-Page success/failure in plain language (Page name, not raw IDs).
+10. **Sync to Google Calendar**: for each successful post from step 9, create a calendar event and link it back to the log entry — see "Google Calendar sync" below, same as the posting workflow.

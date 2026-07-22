@@ -4,6 +4,9 @@ const { appendToLog } = require("./post-log-store");
 
 const GRAPH_VERSION = "v24.0";
 
+// Force every shared post to be publicly visible on the target Page timeline.
+const PUBLIC_PRIVACY = JSON.stringify({ value: "EVERYONE" });
+
 const PageSchema = z.object({
   id: z.string(),
   name: z.string().optional(),
@@ -31,6 +34,7 @@ async function shareToPage(targetPage, { permalinkUrl, message, published, sched
     const params = {
       link: permalinkUrl,
       access_token: targetPage.access_token,
+      privacy: PUBLIC_PRIVACY,
     };
     if (message) params.message = message;
     if (!published) {
