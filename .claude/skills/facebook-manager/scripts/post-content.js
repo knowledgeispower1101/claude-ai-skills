@@ -3,11 +3,14 @@ const axios = require("axios");
 const FormData = require("form-data");
 const { z } = require("zod");
 const { appendToLog } = require("./post-log-store");
+const {
+  DelayRangeSchema,
+  sleep,
+  randomDelaySeconds,
+  reportProgress,
+} = require("./stagger");
 
 const GRAPH_VERSION = "v25.0";
-
-// Force every published post to be publicly visible on the Page timeline.
-const PUBLIC_PRIVACY = JSON.stringify({ value: "EVERYONE" });
 
 const PageTargetSchema = z.object({
   id: z.string(),
@@ -26,77 +29,12 @@ const PostRequestSchema = z
     scheduledTime: z.number().int().optional(),
     // Drive folder this content came from, kept in the log for traceability
     sourceFolder: z.string().optional(),
-    // Seconds to wait between Pages, picked at random from [min, max].
-    // Posting to many Pages in one burst reads as coordinated spam, so the
-    // default staggers them; pass {min:0,max:0} only for a single Page.
-    delayRange: z
-      .object({ min: z.number().min(0), max: z.number().min(0) })
-      .refine((r) => r.max >= r.min, {
-        message: "delayRange.max must be >= delayRange.min",
-      })
-      .default({ min: 120, max: 300 }),
+    delayRange: DelayRangeSchema.default({ min: 120, max: 300 }),
   })
   .refine((data) => data.published || data.scheduledTime, {
     message: "scheduledTime is required when published is false",
     path: ["scheduledTime"],
   });
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function randomDelaySeconds({ min, max }) {
-  return min + Math.random() * (max - min);
-}
-
-function timeLabel(date = new Date()) {
-  return date.toLocaleTimeString("vi-VN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "Asia/Ho_Chi_Minh",
-  });
-}
-
-function formatWait(seconds) {
-  const whole = Math.round(seconds);
-  if (whole < 60) return `${whole}s`;
-  const mins = Math.floor(whole / 60);
-  const secs = whole % 60;
-  return secs ? `${mins}p${secs}s` : `${mins}p`;
-}
-
-function formatRemaining(seconds) {
-  const mins = Math.round(seconds / 60);
-  if (mins < 1) return "sắp xong";
-  if (mins < 60) return `còn ~${mins} phút`;
-  const hours = Math.floor(mins / 60);
-  const rest = mins % 60;
-  return rest ? `còn ~${hours} giờ ${rest} phút` : `còn ~${hours} giờ`;
-}
-
-// Timeline-style progress: one clustered report per Page, so a long staggered
-// run stays legible while it streams.
-function reportProgress(result, results, totalPages, delayRange, next) {
-  const line = result.success
-    ? `${timeLabel()}  ✅  ${(result.name || result.pageId).trim()}`
-    : `${timeLabel()}  ❌  ${(result.name || result.pageId).trim()} — ${result.error}`;
-
-  const done = results.length;
-  const ok = results.filter((r) => r.success).length;
-  const failed = done - ok;
-
-  // Remaining time is dominated by the pauses, not the API calls.
-  const avgDelay = (delayRange.min + delayRange.max) / 2;
-  const remainingSeconds = next
-    ? next.waitSeconds + (totalPages - done - 1) * avgDelay
-    : 0;
-
-  const tail = next ? ` · ${formatRemaining(remainingSeconds)}` : " · hoàn tất";
-
-  console.log(line);
-  console.log(`── ${done}/${totalPages} trang · ✅${ok} ❌${failed}${tail} ──`);
-  if (next) {
-    console.log(`⏳ Kế tiếp: ${next.name} (sau ${formatWait(next.waitSeconds)})`);
-  }
-}
 
 async function uploadUnpublishedPhoto(pageId, pageToken, imagePath) {
   const form = new FormData();
@@ -140,7 +78,7 @@ async function postToPage(
 
     if (totalMedia === 0) {
       // Text-only post
-      const params = { message, access_token: pageToken, privacy: PUBLIC_PRIVACY };
+      const params = { message, access_token: pageToken };
       if (!published) {
         params.published = false;
         params.scheduled_publish_time = scheduledTime;
@@ -157,7 +95,6 @@ async function postToPage(
       form.append("source", fs.createReadStream(imagePaths[0]));
       form.append("caption", message);
       form.append("access_token", pageToken);
-      form.append("privacy", PUBLIC_PRIVACY);
       if (!published) {
         form.append("published", "false");
         form.append("scheduled_publish_time", String(scheduledTime));
@@ -174,7 +111,6 @@ async function postToPage(
       form.append("source", fs.createReadStream(videoPaths[0]));
       form.append("description", message);
       form.append("access_token", pageToken);
-      form.append("privacy", PUBLIC_PRIVACY);
       if (!published) {
         form.append("published", "false");
         form.append("scheduled_publish_time", String(scheduledTime));
@@ -199,7 +135,6 @@ async function postToPage(
       const params = {
         message,
         access_token: pageToken,
-        privacy: PUBLIC_PRIVACY,
         attached_media: JSON.stringify(
           mediaIds.map((mediaId) => ({ media_fbid: mediaId })),
         ),
@@ -251,7 +186,30 @@ async function postContent(request) {
       published,
       scheduledTime,
     });
-    results.push({ ...result, createdAt: new Date().toISOString() });
+    const createdAt = new Date().toISOString();
+    results.push({ ...result, createdAt });
+
+    // Log after every Page, not once at the end: a staggered run takes hours,
+    // and if it is interrupted the posts already published must still be
+    // recorded or there is no way to find and delete them later.
+    if (result.success) {
+      appendToLog([
+        {
+          postId: result.postId,
+          pageId: result.pageId,
+          pageName: result.name,
+          published,
+          scheduledTime: scheduledTime ?? null,
+          createdAt,
+          sourceFolder: sourceFolder ?? null,
+          sharedFrom: null,
+          message,
+          imagePaths,
+          videoPaths,
+          calendarEventId: null,
+        },
+      ]);
+    }
 
     const nextPage = pages[index + 1];
     pendingWait = nextPage ? randomDelaySeconds(delayRange) : 0;
@@ -266,25 +224,6 @@ async function postContent(request) {
         : null,
     );
   }
-
-  const logEntries = results
-    .filter((result) => result.success)
-    .map((result) => ({
-      postId: result.postId,
-      pageId: result.pageId,
-      pageName: result.name,
-      published,
-      scheduledTime: scheduledTime ?? null,
-      createdAt: result.createdAt,
-      sourceFolder: sourceFolder ?? null,
-      sharedFrom: null,
-      message,
-      imagePaths,
-      videoPaths,
-      calendarEventId: null,
-    }));
-
-  appendToLog(logEntries);
 
   return results;
 }

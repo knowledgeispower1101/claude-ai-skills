@@ -63,7 +63,7 @@ All the scripts are in `./scripts/`:
   - also deletes that entry's local downloaded images/video under `./scripts/images/` — but only if no other remaining log entry (in any month) still references them (the same media is often shared across multiple Pages/posts)
   - CLI usage: `node delete-post.js <postId>`
   - exports `deleteLoggedPost(postId)`
-- `share-post.js` - **deprecated for multi-Page use, see "Never publish to many Pages at once" below** — shares one Page's existing post to one or more other Pages, via a "shared link" post (the target Page posts a link to the original, which Facebook renders as a share preview card)
+- `share-post.js` - shares one Page's existing post to one or more other Pages, via a "shared link" post (the target Page posts a link to the original, which Facebook renders as a share preview card). Still usable — the earlier belief that this format specifically was causing hidden posts did not survive testing (see "Posts on the satellite Pages may not be visible" below)
   - `node share-post.js list '{"id":"...","name":"...","access_token":"..."}'` → recent posts of that Page (`id`, `message`, `created_time`, `permalink_url`, `full_picture`), for the user to pick which one to share
   - exports `listRecentPosts(page, limit)` and `shareContent({ sourcePostId, sourcePermalinkUrl, message, targetPages, published, scheduledTime })`
   - `targetPages` is an array of `{ id, name, access_token }`; `message` is an optional extra caption on top of the shared link
@@ -133,17 +133,20 @@ Every piece of content that gets created or scheduled for posting must also show
 8. **Publish**: call `post-content.js` (via `postContent(...)`) once per post, with that post's message, `imagePaths`/`videoPaths`, resolved `published`/`scheduledTime`, confirmed list of `pages`, and `sourceFolder` set to the Drive day-folder path. Report per-post, per-Page success/failure back to the user. Each successful Page post is automatically recorded in that month's log file (see "Post log" below) — no manual bookkeeping needed.
 9. **Sync to Google Calendar**: for each successful Page post from step 8, create a calendar event and link it back to the log entry — see "Google Calendar sync" below. Do this for every publish, whether it went out now or is scheduled for the future.
 
-## Never publish to many Pages at once
+## Posts on the satellite Pages may not be visible — and the API cannot tell you
 
-Two things get a batch hidden by Facebook's integrity systems. Both were confirmed on 2026-07-22, when 34 link-shares and 18 native posts of the *same* content went out minutes apart:
+**Unresolved as of 2026-07-22.** Content on the satellite Pages (Biến tần …, Motor giảm tốc …, Trung Kiên …) is reaching readers inconsistently: some posts are unviewable to anyone who is not a Page admin, while other posts on the same Page, same day, same structure are fine. The main Thiên Hổ Technology Page (5.2k followers) is unaffected.
 
-- **Link-sharing the same post to many Pages.** All 34 link-shares were hidden behind "Bạn hiện không xem được nội dung này" for non-admins, and two were later deleted by Facebook outright. The Graph API still reported them as `is_published: true`, `is_hidden: false`, privacy `EVERYONE`, with intact attachments — the data looks perfect, so **never conclude from the API that a share is fine**. Meanwhile all 18 native photo posts, published concurrently from the same tooling, were untouched. The format is the trigger, not the volume.
-- **Bursting.** `Promise.all` across N Pages puts N identical posts on Facebook in the same second. `postContent` now staggers Pages sequentially instead (see `delayRange`).
+**Never claim a batch is healthy on the strength of API fields.** `is_published: true`, `is_hidden: false` and `privacy: EVERYONE` were all reported for posts that readers could not see. Page-level probes are equally useless here — `is_published`, `is_unclaimed`, `promotion_eligible` all come back clean, and `restrictions` / `country_restrictions` / `age_restrictions` do not exist as fields. Report what the fields say, not what you infer from them.
 
-So, for anything past a couple of Pages:
+Ruled out by direct testing, so don't re-propose these as the cause: post privacy (that was a separate, real bug — see below), link-share vs native format, content duplicated across Pages, album vs single-photo structure, and post age. The leading untested hypothesis is Meta limiting distribution across a network of 40+ low-follower Pages publishing identical content — which, if true, is an operating-model problem, not something to fix in these scripts.
 
-1. **Re-post natively instead of link-sharing.** Use `fetch-source-post.js` to pull the original's caption and media, then `postContent` those to each target Page. Reach for `share-post.js` only when the user explicitly wants a share-preview card and the target list is short.
-2. **Keep the stagger.** Leave `delayRange` at its default unless the user asks otherwise; never set it to zero for a multi-Page run to save time.
+Only the user can resolve it, via **Meta Business Suite → Chất lượng trang / Tình trạng tài khoản** on an affected Page. To check whether a specific post is visible, ask someone with an ordinary logged-in Facebook account who is not a Page admin; incognito is not a valid test, because Facebook gates logged-out browsing regardless of a post's settings.
+
+Given all that, for anything past a couple of Pages:
+
+1. **Confirm visibility before scaling.** Publish to one Page, have it checked by a real non-admin account, and only then run the rest.
+2. **Keep the stagger.** `Promise.all` across N Pages puts N identical posts on Facebook in the same second. `postContent` staggers sequentially instead — leave `delayRange` at its default and never zero it for a multi-Page run to save time.
 3. **Warn the user before a large batch** how long it will take, and offer to split it across several runs or days.
 
 ### Reporting progress on a staggered run
@@ -156,7 +159,11 @@ So, for anything past a couple of Pages:
 ⏳ Kế tiếp: Biến tần Nghệ An (sau 3p10s)
 ```
 
-Run the batch under the **Monitor** tool, not `Bash(run_in_background)`. Monitor turns each stdout line into a chat notification, which is the only way the user gets a live update per Page; a backgrounded Bash command only notifies once, on exit. The three lines above are printed together so Monitor batches them into a single notification per Page. Set `timeout_ms` above the run's expected wall-clock time (34 Pages ≈ 2 hours) or the monitor is killed mid-run.
+Run the batch under the **Monitor** tool, not `Bash(run_in_background)`. Monitor turns each stdout line into a chat notification, which is the only way the user gets a live update per Page; a backgrounded Bash command only notifies once, on exit. The three lines above are printed together so Monitor batches them into a single notification per Page.
+
+Monitor's `timeout_ms` caps out at 1 hour, which is shorter than a full batch (34 Pages ≈ 2 hours), so pass `persistent: true` instead — otherwise the monitor is killed mid-run while the posting continues unwatched. Don't pipe the command through `grep` to tidy the output either: extra pipe stages risk buffering the lines that are the whole point. A couple of startup lines from `get-token.js` are a fair trade.
+
+Validate before launching a long run — resolve every target Page name and fetch the source content first (a `--dry-run` flag on the runner), so a typo fails in seconds rather than 20 minutes in.
 
 Relay these lines to the user as-is — don't reformat them into a table or summarise them away.
 

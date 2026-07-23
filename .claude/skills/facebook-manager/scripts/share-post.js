@@ -1,11 +1,14 @@
 const axios = require("axios");
 const { z } = require("zod");
 const { appendToLog } = require("./post-log-store");
+const {
+  DelayRangeSchema,
+  sleep,
+  randomDelaySeconds,
+  reportProgress,
+} = require("./stagger");
 
 const GRAPH_VERSION = "v24.0";
-
-// Force every shared post to be publicly visible on the target Page timeline.
-const PUBLIC_PRIVACY = JSON.stringify({ value: "EVERYONE" });
 
 const PageSchema = z.object({
   id: z.string(),
@@ -34,7 +37,6 @@ async function shareToPage(targetPage, { permalinkUrl, message, published, sched
     const params = {
       link: permalinkUrl,
       access_token: targetPage.access_token,
-      privacy: PUBLIC_PRIVACY,
     };
     if (message) params.message = message;
     if (!published) {
@@ -63,6 +65,7 @@ const ShareRequestSchema = z
     targetPages: z.array(PageSchema).min(1, "at least one target page is required"),
     published: z.boolean().default(true),
     scheduledTime: z.number().int().optional(),
+    delayRange: DelayRangeSchema.default({ min: 120, max: 300 }),
   })
   .refine((data) => data.published || data.scheduledTime, {
     message: "scheduledTime is required when published is false",
@@ -70,32 +73,69 @@ const ShareRequestSchema = z
   });
 
 async function shareContent(request) {
-  const { sourcePostId, sourcePermalinkUrl, message, targetPages, published, scheduledTime } =
-    ShareRequestSchema.parse(request);
+  const {
+    sourcePostId,
+    sourcePermalinkUrl,
+    message,
+    targetPages,
+    published,
+    scheduledTime,
+    delayRange,
+  } = ShareRequestSchema.parse(request);
 
-  const results = await Promise.all(
-    targetPages.map((page) =>
-      shareToPage(page, { permalinkUrl: sourcePermalinkUrl, message, published, scheduledTime }),
-    ),
-  );
+  // Sequential, not Promise.all: N Pages sharing the same link in the same
+  // second is the pattern Facebook's integrity systems flag.
+  const results = [];
+  // Drawn one iteration ahead so each report can announce the coming pause.
+  let pendingWait = 0;
 
-  const logEntries = results
-    .filter((result) => result.success)
-    .map((result) => ({
-      postId: result.postId,
-      pageId: result.pageId,
-      pageName: result.name,
+  for (const [index, page] of targetPages.entries()) {
+    if (pendingWait > 0) await sleep(pendingWait * 1000);
+
+    const result = await shareToPage(page, {
+      permalinkUrl: sourcePermalinkUrl,
+      message,
       published,
-      scheduledTime: scheduledTime ?? null,
-      createdAt: new Date().toISOString(),
-      sourceFolder: null,
-      sharedFrom: sourcePostId,
-      message: message ?? null,
-      imagePaths: [],
-      calendarEventId: null,
-    }));
+      scheduledTime,
+    });
+    const createdAt = new Date().toISOString();
+    results.push({ ...result, createdAt });
 
-  appendToLog(logEntries);
+    // Log after every Page, not once at the end: a staggered run takes a while,
+    // and if it is interrupted the shares already published must still be
+    // recorded or there is no way to find and delete them later.
+    if (result.success) {
+      appendToLog([
+        {
+          postId: result.postId,
+          pageId: result.pageId,
+          pageName: result.name,
+          published,
+          scheduledTime: scheduledTime ?? null,
+          createdAt,
+          sourceFolder: null,
+          sharedFrom: sourcePostId,
+          message: message ?? null,
+          imagePaths: [],
+          videoPaths: [],
+          calendarEventId: null,
+        },
+      ]);
+    }
+
+    const nextPage = targetPages[index + 1];
+    pendingWait = nextPage ? randomDelaySeconds(delayRange) : 0;
+
+    reportProgress(
+      result,
+      results,
+      targetPages.length,
+      delayRange,
+      nextPage
+        ? { name: (nextPage.name || nextPage.id).trim(), waitSeconds: pendingWait }
+        : null,
+    );
+  }
 
   return results;
 }
