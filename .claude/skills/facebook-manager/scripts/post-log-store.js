@@ -92,6 +92,20 @@ function setCalendarEventId(postId, calendarEventId) {
   return found.entry;
 }
 
+// Rewrites the postId of an existing entry. Used to repair entries written
+// before post-content.js started recording `post_id` for single-photo posts,
+// where the logged id was the photo's rather than the feed post's.
+function setPostId(oldPostId, newPostId) {
+  const found = findEntryLocation(oldPostId);
+  if (!found) {
+    throw new Error(`No log entry found for postId "${oldPostId}"`);
+  }
+
+  found.entry.postId = newPostId;
+  writeLogFile(found.filePath, found.log);
+  return found.entry;
+}
+
 module.exports = {
   LOG_DIR,
   monthKeyFromDate,
@@ -101,4 +115,5 @@ module.exports = {
   appendToLog,
   removeEntry,
   setCalendarEventId,
+  setPostId,
 };

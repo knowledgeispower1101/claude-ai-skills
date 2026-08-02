@@ -32,6 +32,22 @@ async function listRecentPosts(page, limit = 8) {
   return data.data || [];
 }
 
+// The Graph API rejects the /share/p/<code>/ short links the Facebook Share
+// button produces ("The url you supplied is invalid") — but that is the form
+// users copy and paste. Follow the redirect once to the pfbid permalink, which
+// the API does accept, and drop the tracking query string.
+async function resolveShareLink(url) {
+  if (!/facebook\.com\/share\//.test(url)) return url;
+
+  const response = await fetch(url, { redirect: "manual" });
+  const target = response.headers.get("location");
+  if (!target) {
+    throw new Error(`Không giải mã được link rút gọn: ${url}`);
+  }
+
+  return target.split("?")[0];
+}
+
 async function shareToPage(targetPage, { permalinkUrl, message, published, scheduledTime }) {
   try {
     const params = {
@@ -65,7 +81,7 @@ const ShareRequestSchema = z
     targetPages: z.array(PageSchema).min(1, "at least one target page is required"),
     published: z.boolean().default(true),
     scheduledTime: z.number().int().optional(),
-    delayRange: DelayRangeSchema.default({ min: 120, max: 300 }),
+    delayRange: DelayRangeSchema.default({ min: 5, max: 10 }),
   })
   .refine((data) => data.published || data.scheduledTime, {
     message: "scheduledTime is required when published is false",
@@ -83,6 +99,9 @@ async function shareContent(request) {
     delayRange,
   } = ShareRequestSchema.parse(request);
 
+  // Resolved once, not per Page: the redirect is the same for every target.
+  const permalinkUrl = await resolveShareLink(sourcePermalinkUrl);
+
   // Sequential, not Promise.all: N Pages sharing the same link in the same
   // second is the pattern Facebook's integrity systems flag.
   const results = [];
@@ -93,7 +112,7 @@ async function shareContent(request) {
     if (pendingWait > 0) await sleep(pendingWait * 1000);
 
     const result = await shareToPage(page, {
-      permalinkUrl: sourcePermalinkUrl,
+      permalinkUrl,
       message,
       published,
       scheduledTime,
@@ -194,4 +213,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { listRecentPosts, shareContent, shareToPage };
+module.exports = { listRecentPosts, shareContent, shareToPage, resolveShareLink };

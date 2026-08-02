@@ -29,7 +29,7 @@ const PostRequestSchema = z
     scheduledTime: z.number().int().optional(),
     // Drive folder this content came from, kept in the log for traceability
     sourceFolder: z.string().optional(),
-    delayRange: DelayRangeSchema.default({ min: 120, max: 300 }),
+    delayRange: DelayRangeSchema.default({ min: 5, max: 10 }),
   })
   .refine((data) => data.published || data.scheduledTime, {
     message: "scheduledTime is required when published is false",
@@ -151,7 +151,16 @@ async function postToPage(
       );
     }
 
-    return { pageId, name, success: true, postId: response.data.id };
+    // /photos returns the photo id as `id` and the feed post id as `post_id` —
+    // the log needs the post id, otherwise delete-post.js and any permalink
+    // built from the log point at the photo instead of the post. /feed already
+    // returns the post id as `id`, and /videos only ever returns the video id.
+    return {
+      pageId,
+      name,
+      success: true,
+      postId: response.data.post_id || response.data.id,
+    };
   } catch (error) {
     const errorMessage = error.response?.data?.error?.message || error.message;
     return { pageId, name, success: false, error: errorMessage };
