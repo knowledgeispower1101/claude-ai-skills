@@ -82,6 +82,21 @@ All the scripts are in `./scripts/`:
 - `authorize-drive.js` / `google-oauth.js` - Google OAuth setup for the Drive pipeline; run `authorize-drive.js` to re-authorise when Drive calls start failing
 - `daily-share-auto2-to-auto.js` - standalone test job (AutomationTest2 → AutomationTest), unrelated to the production Pages
 
+## Mixing images and video in one post can fail with a permission error
+
+**Verified 2026-08-07.** When `imagePaths` and `videoPaths` are both non-empty, `postContent` uploads each item unpublished first, then combines them into one feed post via `attached_media` (see the `post-content.js` entry above). That specific combined flow can fail with:
+
+```
+(#10) Application does not have permission for this action
+```
+
+even though the same Page's token has `pages_manage_posts` and the same account's token just published fine to other Pages minutes earlier. Confirmed on Trung Kiên Automation (account 1 token, app `motor_giam_toc_gimo`): a mixed post (3 images + 1 video) failed with `#10`, but immediately after, the identical caption posted as **video-only** (`imagePaths: []`, `videoPaths: [the video]`, going through the single-video `/videos` path instead of `attached_media`) succeeded on the same Page with the same token. So the gap is specific to the unpublished-upload-then-attach flow, not video support or the token's scopes in general — most likely the app's `pages_manage_posts` is at Standard Access rather than the Advanced Access (App Review-gated) that flow needs. This is a Meta App Dashboard setting, not something fixable from these scripts.
+
+Don't retry a mixed post silently. If a source post has both images and video and posting fails with `#10`:
+1. Tell the user plainly — don't guess or "just drop the video" on your own initiative.
+2. Offer the proven fallback: post the video alone (drop the images) — confirmed working. Photos-only (drop the video) has not been separately verified but is likely fine since plain multi-photo/text posts to these Pages work routinely.
+3. Whichever the user picks, publish to **one** Page first and confirm before running the rest of the batch, same as any other new content path.
+
 ## Which link to share (`sourcePermalinkUrl`)
 
 **The Graph API rejects `https://www.facebook.com/share/p/<code>/` short links** — the kind the *Chia sẻ → Sao chép liên kết* button produces, and the kind the user will paste. Posting one fails with `The url you supplied is invalid` (verified on 2026-07-29, every Page in the batch). The short link itself is fine; it just has to be resolved first.
