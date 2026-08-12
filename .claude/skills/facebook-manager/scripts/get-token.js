@@ -74,9 +74,8 @@ const getPages = async () => {
 
     console.log(`✅ Successfully fetched ${pages.length} page(s)\n`);
 
-    if (pages.length === 0) 
+    if (pages.length === 0)
       console.log("NO DATA");
-    }
 
     return pages;
   } catch (error) {
